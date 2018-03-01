@@ -1,13 +1,21 @@
-import os
+import time
+round_start = time.time()
+
+import json
 import tensorflow as tf
 import itertools
 import numpy as np
-from random import choice
-import json
+from math import sqrt, log, exp
+from numpy import unravel_index
+from random import choice, random, sample
+np.random.seed(1337)  # for reproducibility
+from keras.models import Sequential, Model, load_model
+import keras.backend as K
 K.set_image_dim_ordering('th')
-import time
 
-round_start = time.time()
+R_T = 0
+C_T = 0
+S_T = 0
 
 def get_policy_dict_list():
     '''Get the relation between policy no. and policy'''
@@ -133,19 +141,26 @@ class Ataxx:
                 best_moves.append(((x0, y0), (x1, y1)))
         return choice(best_moves)
                 
-    def is_valid(self, turn, pos):
+    def is_valid(self, turn, pos, get_pos=False):
         r = pos[0]
         c = pos[1]
         if self.data[r, c] != 0:
-            return False
+            if not get_pos:
+                return False
+            else:
+                return
         else:
             for dr in range(-2, 3):
                 for dc in range(-2, 3):
                     new_r = r+dr
                     new_c = c+dc
                     if new_r >= 0 and new_c >= 0 and new_r < 7 and new_c < 7 and self.data[new_r, new_c] == turn:
-                        return True
-            return False 
+                        if not get_pos:
+                            return True
+                        else:
+                            yield new_r, new_c, dr, dc
+            if not get_pos:
+                return False
         
     def get_moves(self, turn, return_node_info=False):
         action_mask = np.zeros(792, dtype=np.int8)
@@ -155,36 +170,32 @@ class Ataxx:
         for r in range(7):
             for c in range(7):
                 has_duplicate_move = False      # move within the radius of one of another friendly piece is called
-                if self.is_valid(turn, (r, c)): # duplicate move
-                    for dr in range(-2, 3):
-                        for dc in range(-2, 3):
-                            new_r = r+dr
-                            new_c = c+dc
-                            if new_r >= 0 and new_c >= 0 and new_r < 7 and new_c < 7 and self.data[new_r, new_c] == turn:
-                                if abs(dr) <= 1 and abs(dc) <=1:
-                                    if has_duplicate_move: 
-                                        cur_move = ((new_r, new_c), (r, c))
-                                        corr_dict[cur_move] = dup_move
-                                        # update action mask
-                                        if return_node_info: 
-                                            action_mask[policy_dict[cur_move]] = 1
-                                    elif self.data[new_r, new_c] == turn:
-                                        dup_move = ((new_r, new_c), (r, c))
-                                        next_moves.append(dup_move) 
-                                        has_duplicate_move = True
-                                        # preparing children nodes and action mask
-                                        if return_node_info: 
-                                            children_dict[dup_move] = None
-                                            action_mask[policy_dict[dup_move]] = 1
-                                elif self.data[new_r, new_c] == turn:
-                                    cur_move = ((new_r, new_c), (r, c))
-                                    next_moves.append(cur_move) 
-                                    # preparing children nodes and action mask
-                                    if return_node_info:
-                                        children_dict[cur_move] = None
-                                        action_mask[policy_dict[cur_move]] = 1
-                                else:
-                                    continue
+                for new_r, new_c, dr, dc in self.is_valid(turn, (r, c), True): # duplicate move
+                    if new_r >= 0 and new_c >= 0 and new_r < 7 and new_c < 7 and self.data[new_r, new_c] == turn:
+                        if abs(dr) <= 1 and abs(dc) <=1:
+                            if has_duplicate_move: 
+                                cur_move = ((new_r, new_c), (r, c))
+                                corr_dict[cur_move] = dup_move
+                                # update action mask
+                                if return_node_info: 
+                                    action_mask[policy_dict[cur_move]] = 1
+                            elif self.data[new_r, new_c] == turn:
+                                dup_move = ((new_r, new_c), (r, c))
+                                next_moves.append(dup_move) 
+                                has_duplicate_move = True
+                                # preparing children nodes and action mask
+                                if return_node_info: 
+                                    children_dict[dup_move] = None
+                                    action_mask[policy_dict[dup_move]] = 1
+                        elif self.data[new_r, new_c] == turn:
+                            cur_move = ((new_r, new_c), (r, c))
+                            next_moves.append(cur_move) 
+                            # preparing children nodes and action mask
+                            if return_node_info:
+                                children_dict[cur_move] = None
+                                action_mask[policy_dict[cur_move]] = 1
+                        else:
+                            continue
         if return_node_info:
             return next_moves, corr_dict, children_dict, np.array(action_mask)
         else:
@@ -270,8 +281,8 @@ class PolicyValueNetwork():
         self._sess = tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=24))
         K.set_session(self._sess)
         
-        self._model = load_model('AtaxxZero.h5')
-        print("successfully loaded two models")
+        self._model = load_model('/data/AtaxxZero.h5')
+        # print("successfully loaded two models")
            
     def predict(self, feature_map, action_mask):        
         return self._sess.run(self._model.outputs, feed_dict={self._model.inputs[0]: feature_map.reshape(-1, 6, 9, 9), \
@@ -403,7 +414,11 @@ class TreeNode():
         # normalize the array
         out /= out.sum()
         return out
-    
+
+def assign_children(children, p_array):
+    for move in children:
+        children[move] = np.float32(p_array[policy_dict[move]])
+        
 class MCTS():
     def __init__(self, c=1, dep_lim=10, mode=1, game=None, turn=-1):
         # slow_step means how many step we use to do typical mcts, after that we do fast play
@@ -450,57 +465,13 @@ class MCTS():
                 result = (np.array(self._game.data) == 0).sum()
                 steps += 1
             if is_terminal:
-                print("reset failure, do reset again")
+                # print("reset failure, do reset again")
                 self.reset(left_space)
         self.reset_root()
         try: # tell the _root which move led it here
             self._root._move = best_move
         except:
-            pass
-        
-    def plot_move_visit_freq(self):
-        nodes = sorted(self._root._children.items(), key=lambda node: self._root.get_frequency_value(node[1]), reverse=True)
-        p_sum = 0
-        for node in nodes:
-            try:
-                print("{}: n_v:{:>6d} q_all:{:+06.6f} q:{:+06.6f} q_m:{:+06.6f} p:{:06.6f}"\
-                      .format(node[0], node[1]._n_visit, -node[1]._q / (node[1]._n_visit + 1), \
-                              -node[1]._init_q, -node[1]._manual_q, node[1]._p))
-                p_sum += node[1]._p
-            except:
-                pass
-        print("########################p_sum is: ", p_sum)
-                      
-    def get_next_move(self, q_best=True, rollout_times=100, t_lim=np.nan):
-        global policy_list
-        # do mcts
-        self.rollout(rollout_times, t_lim)
-        
-        if not q_best:
-            # return the most frequently visited move
-            index = np.argmax(self._root.get_action_frequency_map())
-            return policy_list[index]
-        else:
-            # return the highest q move
-            if self._root._n_visit > 8:
-                best_q = -5
-                best_move = None
-                for move, node in self._root._children.items():
-                    if node._n_visit > 5 and -node._q / (node._n_visit + 1) > best_q:
-                        best_q = -node._q / (node._n_visit + 1)
-                        best_move = move
-
-            if best_move is None or self._root._n_visit <= 8:
-                print("too few visits, use p policy")
-                best_p = 0
-                best_move = None
-                for move, node in self._root._children.items():
-                    if node._p > best_p:
-                        best_p = node._p
-                        best_move = move
-            
-            return best_move
-            
+            pass 
         
     def make_a_move(self, next_move):
         # move the root to next_move's root
@@ -610,6 +581,7 @@ class MCTS():
             
 
     def rollout(self, rollout_times=100, t_lim=np.nan, t_min=2):
+        global R_T
         start = time.time()
         for i in range(int(rollout_times*1.1)): 
             tmp_node = self._root
@@ -644,13 +616,46 @@ class MCTS():
                 # update steps                                    
                 step += 1
             cur_time = time.time() - start
+            
+            R_T = i
+            
             if cur_time > t_lim * 0.999:
-                print("due to time lim, final rollout times: ", i, "time elapsed: ", cur_time)
+                # print("due to time lim, final rollout times: ", i, "time elapsed: ", cur_time)
                 break
             
             if cur_time > t_min and i > rollout_times:
-                print("due to rollout lim, final rollout times: ", i, "time elapsed: ", cur_time)
+                # print("due to rollout lim, final rollout times: ", i, "time elapsed: ", cur_time)
                 break
+                
+    def get_next_move(self, q_best=True, rollout_times=100, t_lim=np.nan):
+        global policy_list
+        # do mcts
+        self.rollout(rollout_times, t_lim)
+        
+        if not q_best:
+            # return the most frequently visited move
+            index = np.argmax(self._root.get_action_frequency_map())
+            return policy_list[index]
+        else:
+            # return the highest q move
+            if self._root._n_visit > 8:
+                best_q = -5
+                best_move = None
+                for move, node in self._root._children.items():
+                    if node._n_visit > 5 and -node._q / (node._n_visit + 1) > best_q:
+                        best_q = -node._q / (node._n_visit + 1)
+                        best_move = move
+
+            if self._root._n_visit <= 8 or best_move is None:
+                # print("too few visits, use p policy")
+                best_p = 0
+                best_move = None
+                for move, node in self._root._children.items():
+                    if node._p > best_p:
+                        best_p = node._p
+                        best_move = move
+            
+            return best_move
 
 def recover_game():
     """recover game from input log"""
@@ -688,17 +693,37 @@ def recover_game():
         
     return game, my_turn
 
-def broadcast_move(move):
+def broadcast_move(move, debug_info=''):
     this_response = {'x0': move[0][0], 'y0': move[0][1], 'x1':move[1][0], 'y1':move[1][1]}
     print(json.dumps({
         "response": this_response,
+        "debug": debug_info
     }))
+
+def get_dep_lim(current_game):
+    space = (current_game.data == 0).sum()
+    if space > 44:
+        return 3
+    elif space < 5:
+        return 3
+    elif space < 3:
+        return 4
+    else:
+        return 2
 
 # recover the game board
 current_game, my_turn = recover_game()
 
 # get move
-player = MCTS(c=10, dep_lim=3, game=current_game, turn=my_turn)
-move = player.get_next_move(rollout_times=1000, t_lim=6 - (time.time() - round_start) - 0.5)
-print(move)
+dep_lim = get_dep_lim(current_game)
+player = MCTS(c=5, dep_lim=dep_lim, game=current_game, turn=my_turn)
 
+C_T = time.time() - round_start
+
+move = player.get_next_move(rollout_times=500, t_lim=6 - (time.time() - round_start) - 1.25)
+
+S_T = time.time() - round_start - C_T
+
+# broadcast move
+debug_info = "dep_lim {}, rollout no. {}, configuration time {}, searching time {}".format(dep_lim, R_T, C_T, S_T)
+broadcast_move(move, debug_info)
