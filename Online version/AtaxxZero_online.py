@@ -7,11 +7,11 @@ import itertools
 import numpy as np
 from math import sqrt, log, exp
 from numpy import unravel_index
-from random import choice, random, sample
-np.random.seed(1337)  # for reproducibility
+from random import choice, random, sample, seed
 from keras.models import Sequential, Model, load_model
 import keras.backend as K
 K.set_image_dim_ordering('th')
+seed()
 
 R_T = 0
 C_T = 0
