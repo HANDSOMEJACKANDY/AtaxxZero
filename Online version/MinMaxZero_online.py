@@ -37,12 +37,11 @@ class Ataxx:
                             
 '''These methods are for Min max with ataxxzero'''
 class PolicyValueNetwork():
-    def __init__(self):
+    def __init__(self, model_name):
         self._sess = tf.Session(config=tf.ConfigProto(intra_op_parallelism_threads=24))
         K.set_session(self._sess)
         
-        self._model = load_model('/data/AtaxxZero.h5')
-        # print("successfully loaded two models")
+        self._model = load_model(model_name)
            
     def predict(self, feature_map, action_mask):        
         return self._sess.run(self._model.outputs, feed_dict={self._model.inputs[0]: feature_map.reshape(-1, 6, 9, 9), \
@@ -50,8 +49,8 @@ class PolicyValueNetwork():
     
     
 class MinMaxZero():
-    def __init__(self, p_thresh, c_thresh):
-        self._evaluator = PolicyValueNetwork()
+    def __init__(self, p_thresh, c_thresh, model_name="/data/AtaxxZero.h5"):
+        self._evaluator = PolicyValueNetwork(model_name)
         self._policy_dict = self.get_policy_dict()
         self._p_thresh = p_thresh
         self._c_thresh = c_thresh
@@ -103,9 +102,9 @@ class MinMaxZero():
         result = self._evaluator.predict(feature_map, action_mask)
         p = result[0][0]
         if turn == target_turn:
-            q = result[1][0]
+            q = result[1][0][0]
         else:
-            q = -result[1][0]
+            q = -result[1][0][0]
         return p, q
 
     @staticmethod
@@ -186,11 +185,13 @@ class MinMaxZero():
             elif diff < 0:
                 return -1, None
             else:
-                op_next_moves, _ = self.get_moves(board, -target_turn)
-                if len(op_next_moves) > 0:
-                    return -1, None
-                else:
+                turn_no = (board == turn).sum()
+                if turn == -target_turn:
+                    turn_no = 49 - turn_no # set turn_no to represent the number of target turn pieces
+                if turn_no >= 45:
                     return 1, None
+                else:
+                    return -1, None
         else: # otherwise calculate p and q and do the NN pruned minmax searching
             feature_map = self.get_feature_map(board, turn, pre_move)
             p, q = self.evaluate(feature_map, action_mask, turn, target_turn)
@@ -223,43 +224,47 @@ class MinMaxZero():
                 # do searching
                 result, _ = self.min_max(self.move_to(board, turn, move[0], move[1]), \
                                     -turn, target_turn, depth-1, alpha, beta, not is_max, False, move, t_lim)
+                # record all the move and its alpha value
+                if is_root:
+                    try:
+                        move_value.append((move, result))
+                    except:
+                        move_value = [(move, result)]
                 # prun the searching tree or update alpha and beta respectively
                 if is_max:
                     if result >= beta:
                         return 100, None
                     elif result > alpha:
                         alpha = result
-                        if is_root:
-                            best_moves = [move]
-                        else:
-                            best_move = move
-                    elif result == alpha and is_root:
-                        best_moves.append(move)
+                        best_move = move
                 else:
                     if result <= alpha:
                         return -100, None
                     elif result < beta:
                         beta = result
-                        if is_root:
-                            best_moves = [move]
-                        else:
-                            best_move = move
-                    elif result == beta and is_root:
-                        best_moves.append(move)
+                        best_move = move
 
                 if (sum_prob >= prob_thresh and counter >= counter_thresh) or time.time() - self._start >= t_lim:
                     break
+                    
+            if is_root: # incorporate ramdom characteristic
+                move_value = sorted(move_value, key=lambda x: x[1], reverse=True)
+                max_value = alpha
+                for move, value in move_value:
+                    if value >= max_value - 0.1 * abs(max_value):
+                        try:
+                            best_move.append(move)
+                        except:
+                            best_move = [move]
+                    else:
+                        break
+                best_move = choice(best_move)
 
             if is_max:
-                if is_root:
-                    return alpha, choice(best_moves)
-                else:
-                    return alpha, best_move
+                return alpha, best_move
             else:
-                if is_root:
-                    return beta, choice(best_moves)
-                else:
-                    return beta, best_move            
+                return beta, best_move
+ 
             
 def recover_game():
     """recover game from input log"""
@@ -337,7 +342,7 @@ else:
     dep_lim = None
 
 # configurate actor
-minmax_zero = MinMaxZero(0.99, 100)
+minmax_zero = MinMaxZero(0.99, 100, "/data/AtaxxZero_91.2p_82.4q.h5")
 
 # get dep lim
 dep_lim = get_dep_lim(current_game, dep_lim)
@@ -346,8 +351,6 @@ dep_lim = get_dep_lim(current_game, dep_lim)
 C_T = time.time() - round_start
 
 _, move = minmax_zero.min_max(current_game.data, my_turn, my_turn, depth=dep_lim, pre_move=pre_move, t_lim=5.75 - C_T)
-if move is None:
-    raise ValueError(str(dep_lim) + str(move))
 
 S_T = time.time() - round_start - C_T
 
