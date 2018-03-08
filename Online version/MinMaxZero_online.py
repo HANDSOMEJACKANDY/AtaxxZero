@@ -164,12 +164,17 @@ class MinMaxZero():
                         board[x1+dr, y1+dc] = turn
         return board
     
+    @staticmethod
+    def belief(x):
+        return 1 / (1 + exp(-7.5 * (x - 0.5)))
+    
     def min_max(self, board, turn, target_turn, depth=3, alpha=-100, beta=100, is_max=True, is_root=True, \
                 pre_move=None, t_lim=1):
         '''A recursive alpha beta pruning min_max function
         return: board evaluation, chosen move
         NB. for board evaluation, if the searching was pruned, it will return 100 for a minimizer and -100 for a maximizer'''
         if is_root:
+            self.node_searched = 0
             best_moves = []
             self._start = time.time()
         else:
@@ -179,6 +184,7 @@ class MinMaxZero():
         next_moves, action_mask = self.get_moves(board, turn)
         # stop searching if the game is over
         if len(next_moves) == 0:
+            self.node_searched += 1
             diff = (board == target_turn).sum() - (board == -target_turn).sum()
             if diff > 0:
                 return 1, None
@@ -196,17 +202,17 @@ class MinMaxZero():
             feature_map = self.get_feature_map(board, turn, pre_move)
             p, q = self.evaluate(feature_map, action_mask, turn, target_turn)
             
-        if depth == 0: # once the recursion reaches the end, return the leaf node value
+        if depth == 0: # once the recursion reaches the end, return the leaf node value          
+            self.node_searched += 1
             return q, None
         else:
             # generate move corresponding p list
             move_prob = []
             all_prob = 0.0
-            for move in next_moves:
-                prob = p[self._policy_dict[move]]
-                move_prob.append((move, prob))
-                all_prob += prob
+            move_prob = [(move, p[self._policy_dict[move]]) for move in next_moves if p[self._policy_dict[move]] >= 0.0005]
             move_prob = sorted(move_prob, key=lambda x: x[1], reverse=True)
+            for _, prob in move_prob:
+                all_prob += prob
 
             if is_max:
                 alpha = -100
@@ -216,7 +222,10 @@ class MinMaxZero():
             sum_prob = 0.0
             counter = 0
             counter_thresh = len(move_prob) / self._c_thresh
-            prob_thresh = all_prob * self._p_thresh
+            if depth != 1: # make sure only the high quality q get returned
+                prob_thresh = all_prob * self._p_thresh
+            else:
+                prob_thresh = all_prob * 0.99
             # display_move_prob(move_prob)
             for move, prob in move_prob:
                 sum_prob += prob
@@ -236,22 +245,28 @@ class MinMaxZero():
                         return 100, None
                     elif result > alpha:
                         alpha = result
-                        best_move = move
+                        best_move = None
                 else:
                     if result <= alpha:
                         return -100, None
                     elif result < beta:
                         beta = result
-                        best_move = move
-
+                        best_move = None
+                
                 if (sum_prob >= prob_thresh and counter >= counter_thresh) or time.time() - self._start >= t_lim:
+                    belief = float(counter) / len(move_prob)
+                    belief = self.belief(belief)
+                    if is_max:
+                        alpha = belief * alpha + (1 - belief) * q
+                    else:
+                        beta = belief * beta + (1 - belief) * q
                     break
                     
             if is_root: # incorporate ramdom characteristic
                 move_value = sorted(move_value, key=lambda x: x[1], reverse=True)
-                max_value = alpha
+                max_value = move_value[0][1]
                 for move, value in move_value:
-                    if value >= max_value - 0.1 * abs(max_value):
+                    if value >= max_value - 0.01 * abs(max_value):
                         try:
                             best_move.append(move)
                         except:
@@ -319,8 +334,14 @@ def get_dep_lim(current_game, dep_lim):
         return 4
     elif space == 41 or space == 42:
         return 3
-    elif space == 3 or space == 4:
-        return 5
+    elif space > 8:
+        return 3
+    elif space == 4:
+        return 4
+    elif space == 2:
+        return 6
+    elif space == 1:
+        return 7
     else:
         return dep_lim
 
@@ -342,7 +363,7 @@ else:
     dep_lim = None
 
 # configurate actor
-minmax_zero = MinMaxZero(0.99, 100, "/data/AtaxxZero_91.2p_82.4q.h5")
+minmax_zero = MinMaxZero(0.999, 100, "/data/AtaxxZero_91.2p_82.4q.h5")
 
 # get dep lim
 dep_lim = get_dep_lim(current_game, dep_lim)
@@ -350,16 +371,16 @@ dep_lim = get_dep_lim(current_game, dep_lim)
 # search for moves
 C_T = time.time() - round_start
 
-_, move = minmax_zero.min_max(current_game.data, my_turn, my_turn, depth=dep_lim, pre_move=pre_move, t_lim=5.75 - C_T)
+alpha, move = minmax_zero.min_max(current_game.data, my_turn, my_turn, depth=dep_lim, pre_move=pre_move, t_lim=5.65 - C_T)
 
 S_T = time.time() - round_start - C_T
 
 # pass data
 if data is None:
     data = [None, 0]
-if S_T / (5.75 - C_T) > 1:
+if S_T / (5.65 - C_T) > 1:
     data[1] -= 1
-elif S_T / (5.75 - C_T) < 0.20:
+elif S_T / (5.65 - C_T) < 0.20:
     data[1] += 1
 elif data[1] > 0:
     data[1] = 0
@@ -369,6 +390,6 @@ data[0] = dep_lim
     
 # broadcast move
 L_T = 6 - (time.time() - round_start)
-debug_info = "dep_lim {}, recover time {}, total configuration time {}, \
-                searching time {}, left time {}, data {}".format(dep_lim, R_T, C_T, S_T, L_T, data)
+debug_info = "node searched {}, dep_lim {}, estimate alpha {}, recover time {}, total configuration time {}, \
+                searching time {}, left time {}, data {}".format(minmax_zero.node_searched, dep_lim, alpha, R_T, C_T, S_T, L_T, data)
 broadcast(move, debug_info, data)
